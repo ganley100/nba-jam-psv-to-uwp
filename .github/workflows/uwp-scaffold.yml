@@ -1,0 +1,34 @@
+name: UWP Scaffold
+
+on:
+  push:
+    branches: [ xbox-uwp ]
+  workflow_dispatch:
+
+jobs:
+  note:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Status
+        run: |
+          echo "================================================"
+          echo " NBA Jam Xbox UWP loader – scaffold only"
+          echo "================================================"
+          echo ""
+          echo "This workflow is a placeholder."
+          echo "A real MSBuild / CMake UWP build will be added"
+          echo "once the Windows project files exist."
+          echo ""
+          echo "Branch: xbox-uwp"
+          echo "Repo:   ganley100/nba-jam-psv-to-uwp"
+
+  # Future real build job (disabled for now)
+  # build-uwp:
+  #   runs-on: windows-2022
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: microsoft/setup-msbuild@v2
+  #     - name: Build UWP package
+  #       run: msbuild ...
