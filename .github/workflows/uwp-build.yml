@@ -1,0 +1,69 @@
+name: UWP Build
+
+on:
+  push:
+    branches: [ xbox-uwp ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Create placeholder assets + test certificate
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          $assets = Join-Path $PWD "uwp\Assets"
+          New-Item -ItemType Directory -Force -Path $assets | Out-Null
+
+          function Make($name, $w, $h) {
+            $b = New-Object System.Drawing.Bitmap $w, $h
+            $g = [System.Drawing.Graphics]::FromImage($b)
+            $g.Clear([System.Drawing.Color]::FromArgb(255, 26, 26, 46))
+            $g.Dispose()
+            $b.Save("$assets\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $b.Dispose()
+          }
+          Make StoreLogo 50 50
+          Make Square44x44Logo 44 44
+          Make Square150x150Logo 150 150
+          Make Wide310x150Logo 310 150
+          Make SplashScreen 620 300
+
+          $cert = New-SelfSignedCertificate -Type Custom -Subject "CN=NbaJamLoader" `
+            -KeyUsage DigitalSignature -FriendlyName "NbaJamLoader" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+          $pw = ConvertTo-SecureString -String "loader" -Force -AsPlainText
+          Export-PfxCertificate -Cert $cert -FilePath "$PWD\loader.pfx" -Password $pw | Out-Null
+          Export-Certificate -Cert $cert -FilePath "$PWD\loader.cer" | Out-Null
+          "THUMB=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build and package UWP
+        shell: cmd
+        run: |
+          msbuild uwp\NbaJamLoader.vcxproj ^
+            /p:Configuration=Release ^
+            /p:Platform=x64 ^
+            /p:AppxBundle=Never ^
+            /p:UapAppxPackageBuildMode=SideloadOnly ^
+            /p:AppxPackageSigningEnabled=true ^
+            /p:PackageCertificateKeyFile=%GITHUB_WORKSPACE%\loader.pfx ^
+            /p:PackageCertificatePassword=loader ^
+            /p:PackageCertificateThumbprint=%THUMB% ^
+            /p:AppxPackageDir=%GITHUB_WORKSPACE%\out\ ^
+            /p:GenerateAppxPackageOnBuild=true ^
+            /v:m
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: NbaJamLoader
+          path: |
+            out/**
+            loader.cer
+          if-no-files-found: warn
