@@ -1,37 +1,28 @@
 # NBA Jam Mobile (Xbox Dev Mode)
 
-UWP loader shell for the Android version of NBA Jam on Xbox Series X|S Developer Mode.
+## Put the OBB and APK here
+
+```
+D:\DevelopmentFiles\NBA Jam Mobile\
+```
+
+Copy into that folder:
+
+| File | Notes |
+|------|--------|
+| Your `.apk` | Keep a copy of the Android package |
+| Your `.obb` | e.g. `main.40080.com.eamobile.nbajam_row_wf.obb` |
+| `libnbajam.so` | Extract from the APK (`lib/armeabi-v7a` or `lib/arm64-v8a`) |
+
+Create the folder with Device Portal → File explorer, or from a PC if you have SMB/network access to the console.
+
+On launch the app scans that path and lists what it finds.
 
 ## Display name
 
-**NBA Jam Mobile** (package identity: `NbaJamMobile`)
+**NBA Jam Mobile** (identity `NbaJamMobile`)
 
-On the Xbox it will show up under that name in Dev Mode / My games & apps.
+## Build / sideload
 
-## Game files folder
-
-When the file picker lands, put your legally obtained Android data here:
-
-```
-NBA Jam Mobile/
-  libnbajam.so
-  (data / OBB contents)
-```
-
-You can keep that folder on a USB drive attached to the Xbox or under the app LocalState once import is implemented.
-
-## Icons
-
-Tiles use full-bleed artwork (no letterboxing). Source art is the official-style NBA Jam Mobile icon; CI builds all required UWP sizes (`StoreLogo`, `Square44`, `Square150`, `Wide310x150`, `SplashScreen`).
-
-## Build
-
-GitHub Actions → **UWP Build** on branch `xbox-uwp`.
-
-Artifact name: **NbaJamMobile** (`.appx` + `loader.cer` + dependencies).
-
-## Sideload (Device Portal)
-
-1. Install `loader.cer`
-2. Add the `.appx` and `Dependencies\x64`
-3. Launch **NBA Jam Mobile**
+GitHub Actions → **UWP Build** on `xbox-uwp`.  
+Artifact: **NbaJamMobile**. Install `loader.cer`, then the `.appx` + dependencies via Device Portal.

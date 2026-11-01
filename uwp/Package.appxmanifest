@@ -3,10 +3,11 @@
          xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
          xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
-         IgnorableNamespaces="uap mp uap3">
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap mp uap3 rescap">
   <Identity Name="NbaJamMobile"
             Publisher="CN=NbaJamLoader"
-            Version="0.1.0.0"
+            Version="0.1.1.0"
             ProcessorArchitecture="x64" />
   <mp:PhoneIdentity PhoneProductId="a1b2c3d4-e5f6-7890-abcd-ef1234567890"
                     PhonePublisherId="00000000-0000-0000-0000-000000000000" />
@@ -27,7 +28,7 @@
       <uap:VisualElements DisplayName="NBA Jam Mobile"
                           Square150x150Logo="Assets\Square150x150Logo.png"
                           Square44x44Logo="Assets\Square44x44Logo.png"
-                          Description="NBA Jam Mobile – Android SO loader for Xbox Dev Mode"
+                          Description="NBA Jam Mobile – put APK and OBB in D:\DevelopmentFiles\NBA Jam Mobile"
                           BackgroundColor="#000000">
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png"
                          Square310x310Logo="Assets\Square150x150Logo.png"
@@ -43,5 +44,7 @@
   </Applications>
   <Capabilities>
     <Capability Name="internetClient" />
+    <!-- Needed to read D:\DevelopmentFiles on Xbox Dev Mode -->
+    <rescap:Capability Name="broadFileSystemAccess" />
   </Capabilities>
 </Package>
