@@ -13,26 +13,83 @@ jobs:
 
       - uses: microsoft/setup-msbuild@v2
 
-      - name: Create placeholder assets + test certificate
+      - name: Decode icon assets + test certificate
         shell: pwsh
         run: |
-          Add-Type -AssemblyName System.Drawing
           $assets = Join-Path $PWD "uwp\Assets"
           New-Item -ItemType Directory -Force -Path $assets | Out-Null
 
-          function Make($name, $w, $h) {
-            $b = New-Object System.Drawing.Bitmap $w, $h
-            $g = [System.Drawing.Graphics]::FromImage($b)
-            $g.Clear([System.Drawing.Color]::FromArgb(255, 26, 26, 46))
-            $g.Dispose()
-            $b.Save("$assets\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
-            $b.Dispose()
+          function Decode-B64($name) {
+            $b64path = Join-Path $assets "$name.b64"
+            if (Test-Path $b64path) {
+              $bytes = [Convert]::FromBase64String((Get-Content -Raw $b64path))
+              [IO.File]::WriteAllBytes((Join-Path $assets $name), $bytes)
+              Write-Host "Decoded $name ($($bytes.Length) bytes)"
+            } else {
+              Write-Host "Missing $name.b64 – will synthesize"
+            }
           }
-          Make StoreLogo 50 50
-          Make Square44x44Logo 44 44
-          Make Square150x150Logo 150 150
-          Make Wide310x150Logo 310 150
-          Make SplashScreen 620 300
+
+          Decode-B64 "StoreLogo.png"
+          Decode-B64 "Square44x44Logo.png"
+          Decode-B64 "Square150x150Logo.png"
+          Decode-B64 "Wide310x150Logo.png"
+
+          # Splash: prefer committed b64, else scale 150 logo or solid black
+          $splashPath = Join-Path $assets "SplashScreen.png"
+          $splashB64 = Join-Path $assets "SplashScreen.png.b64"
+          if (Test-Path $splashB64) {
+            Decode-B64 "SplashScreen.png"
+          } else {
+            Add-Type -AssemblyName System.Drawing
+            $srcPath = Join-Path $assets "Square150x150Logo.png"
+            if (Test-Path $srcPath) {
+              $src = [System.Drawing.Image]::FromFile($srcPath)
+              $b = New-Object System.Drawing.Bitmap 620, 300
+              $g = [System.Drawing.Graphics]::FromImage($b)
+              $g.Clear([System.Drawing.Color]::Black)
+              $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+              # full-bleed cover
+              $scale = [Math]::Max(620.0 / $src.Width, 300.0 / $src.Height)
+              $w = [int]($src.Width * $scale)
+              $h = [int]($src.Height * $scale)
+              $x = (620 - $w) / 2
+              $y = (300 - $h) / 2
+              $g.DrawImage($src, $x, $y, $w, $h)
+              $g.Dispose(); $src.Dispose()
+              $b.Save($splashPath, [System.Drawing.Imaging.ImageFormat]::Png)
+              $b.Dispose()
+              Write-Host "Synthesized SplashScreen.png from Square150"
+            } else {
+              $b = New-Object System.Drawing.Bitmap 620, 300
+              $g = [System.Drawing.Graphics]::FromImage($b)
+              $g.Clear([System.Drawing.Color]::Black)
+              $g.Dispose()
+              $b.Save($splashPath, [System.Drawing.Imaging.ImageFormat]::Png)
+              $b.Dispose()
+            }
+          }
+
+          # Ensure every required file exists (fallback solid)
+          Add-Type -AssemblyName System.Drawing
+          foreach ($pair in @(
+            @{N='StoreLogo.png';W=50;H=50},
+            @{N='Square44x44Logo.png';W=44;H=44},
+            @{N='Square150x150Logo.png';W=150;H=150},
+            @{N='Wide310x150Logo.png';W=310;H=150},
+            @{N='SplashScreen.png';W=620;H=300}
+          )) {
+            $fp = Join-Path $assets $pair.N
+            if (-not (Test-Path $fp)) {
+              $b = New-Object System.Drawing.Bitmap $pair.W, $pair.H
+              $g = [System.Drawing.Graphics]::FromImage($b)
+              $g.Clear([System.Drawing.Color]::Black)
+              $g.Dispose()
+              $b.Save($fp, [System.Drawing.Imaging.ImageFormat]::Png)
+              $b.Dispose()
+              Write-Host "Fallback solid $($pair.N)"
+            }
+          }
 
           $cert = New-SelfSignedCertificate -Type Custom -Subject "CN=NbaJamLoader" `
             -KeyUsage DigitalSignature -FriendlyName "NbaJamLoader" `
@@ -62,7 +119,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: NbaJamLoader
+          name: NbaJamMobile
           path: |
             out/**
             loader.cer

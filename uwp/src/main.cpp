@@ -1,5 +1,5 @@
-// NBA Jam Loader – minimal UWP shell for Xbox Dev Mode
-// Links so_util_win and shows status. SO loading UI comes next.
+// NBA Jam Mobile – UWP shell for Xbox Dev Mode
+// Links so_util_win. Game .so loading UI comes next.
 
 #include <windows.h>
 #include <wrl/client.h>
@@ -48,11 +48,17 @@ static void Log(const wchar_t* fmt, ...) {
 }
 
 static void RunProbe() {
-    Log(L"NBA Jam Loader 0.1 (UWP scaffold)");
+    Log(L"NBA Jam Mobile 0.1");
+    Log(L"Xbox Dev Mode loader scaffold");
     Log(L"so_util_win linked OK");
     Log(L"");
-    Log(L"This build does not load a game yet.");
-    Log(L"Next: file picker + so_file_load() on your libnbajam.so");
+    Log(L"Place your game files under a folder named:");
+    Log(L"  NBA Jam Mobile");
+    Log(L"(e.g. on a USB drive or in LocalState when the picker lands).");
+    Log(L"");
+    Log(L"Expected contents (you supply these):");
+    Log(L"  libnbajam.so");
+    Log(L"  data / OBB files");
     Log(L"");
     Log(L"AppMemoryUsageLimit = %llu MB",
         Windows::System::MemoryManager::AppMemoryUsageLimit >> 20);
@@ -72,7 +78,7 @@ namespace NbaJamLoader {
             tb->TextWrapping = UI::TextWrapping::Wrap;
             tb->Margin = UI::ThicknessHelper::FromUniformLength(40);
             tb->Foreground = ref new UI::Media::SolidColorBrush(Windows::UI::Colors::White);
-            tb->Text = L"Starting...";
+            tb->Text = L"Starting NBA Jam Mobile...";
 
             auto sv = ref new UI::Controls::ScrollViewer();
             sv->Content = tb;
@@ -80,7 +86,7 @@ namespace NbaJamLoader {
 
             auto grid = ref new UI::Controls::Grid();
             grid->Background = ref new UI::Media::SolidColorBrush(
-                Windows::UI::ColorHelper::FromArgb(255, 26, 26, 46));
+                Windows::UI::ColorHelper::FromArgb(255, 0, 0, 0));
             grid->Children->Append(sv);
 
             UI::Window::Current->Content = grid;

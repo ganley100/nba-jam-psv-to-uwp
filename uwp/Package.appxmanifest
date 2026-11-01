@@ -4,15 +4,15 @@
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
          xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
          IgnorableNamespaces="uap mp uap3">
-  <Identity Name="NbaJamLoader.UWP"
+  <Identity Name="NbaJamMobile"
             Publisher="CN=NbaJamLoader"
             Version="0.1.0.0"
             ProcessorArchitecture="x64" />
   <mp:PhoneIdentity PhoneProductId="a1b2c3d4-e5f6-7890-abcd-ef1234567890"
                     PhonePublisherId="00000000-0000-0000-0000-000000000000" />
   <Properties>
-    <DisplayName>NBA Jam Loader</DisplayName>
-    <PublisherDisplayName>NbaJamLoader</PublisherDisplayName>
+    <DisplayName>NBA Jam Mobile</DisplayName>
+    <PublisherDisplayName>NBA Jam Mobile</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
   <Dependencies>
@@ -24,19 +24,24 @@
   </Resources>
   <Applications>
     <Application Id="App" Executable="$targetnametoken$.exe" EntryPoint="NbaJamLoader.App">
-      <uap:VisualElements DisplayName="NBA Jam Loader"
+      <uap:VisualElements DisplayName="NBA Jam Mobile"
                           Square150x150Logo="Assets\Square150x150Logo.png"
                           Square44x44Logo="Assets\Square44x44Logo.png"
-                          Description="Android SO loader for NBA Jam on Xbox Dev Mode"
-                          BackgroundColor="#1a1a2e">
-        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
-        <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="#1a1a2e" />
+                          Description="NBA Jam Mobile – Android SO loader for Xbox Dev Mode"
+                          BackgroundColor="#000000">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png"
+                         Square310x310Logo="Assets\Square150x150Logo.png"
+                         ShortName="NBA Jam Mobile">
+          <uap:ShowNameOnTiles>
+            <uap:ShowOn Tile="square150x150Logo" />
+            <uap:ShowOn Tile="wide310x150Logo" />
+          </uap:ShowNameOnTiles>
+        </uap:DefaultTile>
+        <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="#000000" />
       </uap:VisualElements>
     </Application>
   </Applications>
   <Capabilities>
     <Capability Name="internetClient" />
-    <uap:Capability Name="picturesLibrary" />
-    <!-- broadFileSystemAccess can be added later if needed for picking game folders -->
   </Capabilities>
 </Package>
