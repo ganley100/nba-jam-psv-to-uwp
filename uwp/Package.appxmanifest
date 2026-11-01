@@ -7,7 +7,7 @@
          IgnorableNamespaces="uap mp uap3 rescap">
   <Identity Name="NbaJamMobile"
             Publisher="CN=NbaJamLoader"
-            Version="0.1.1.0"
+            Version="0.1.2.0"
             ProcessorArchitecture="x64" />
   <mp:PhoneIdentity PhoneProductId="a1b2c3d4-e5f6-7890-abcd-ef1234567890"
                     PhonePublisherId="00000000-0000-0000-0000-000000000000" />
@@ -31,7 +31,7 @@
                           Description="NBA Jam Mobile – put APK and OBB in D:\DevelopmentFiles\NBA Jam Mobile"
                           BackgroundColor="#000000">
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png"
-                         Square310x310Logo="Assets\Square150x150Logo.png"
+                         Square310x310Logo="Assets\Square310x310Logo.png"
                          ShortName="NBA Jam Mobile">
           <uap:ShowNameOnTiles>
             <uap:ShowOn Tile="square150x150Logo" />
@@ -44,7 +44,6 @@
   </Applications>
   <Capabilities>
     <Capability Name="internetClient" />
-    <!-- Needed to read D:\DevelopmentFiles on Xbox Dev Mode -->
     <rescap:Capability Name="broadFileSystemAccess" />
   </Capabilities>
 </Package>
