@@ -2,12 +2,11 @@
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
          xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-         xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-         IgnorableNamespaces="uap mp uap3 rescap">
+         IgnorableNamespaces="uap mp rescap">
   <Identity Name="NbaJamMobile"
             Publisher="CN=NbaJamLoader"
-            Version="0.2.1.0"
+            Version="0.2.2.0"
             ProcessorArchitecture="x64" />
   <mp:PhoneIdentity PhoneProductId="a1b2c3d4-e5f6-7890-abcd-ef1234567890"
                     PhonePublisherId="00000000-0000-0000-0000-000000000000" />
@@ -28,16 +27,11 @@
       <uap:VisualElements DisplayName="NBA Jam Mobile"
                           Square150x150Logo="Assets\Square150x150Logo.png"
                           Square44x44Logo="Assets\Square44x44Logo.png"
-                          Description="NBA Jam Mobile – put APK and OBB in D:\DevelopmentFiles\NBA Jam Mobile"
+                          Description="NBA Jam Mobile loader"
                           BackgroundColor="#000000">
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png"
                          Square310x310Logo="Assets\Square310x310Logo.png"
-                         ShortName="NBA Jam Mobile">
-          <uap:ShowNameOnTiles>
-            <uap:ShowOn Tile="square150x150Logo" />
-            <uap:ShowOn Tile="wide310x150Logo" />
-          </uap:ShowNameOnTiles>
-        </uap:DefaultTile>
+                         ShortName="NBA Jam Mobile" />
         <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="#000000" />
       </uap:VisualElements>
     </Application>

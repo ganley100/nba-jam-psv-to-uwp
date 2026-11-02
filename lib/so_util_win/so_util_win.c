@@ -1,11 +1,6 @@
 /*
- * so_util_win.c – Windows x64 Android ELF loader (load / relocate / resolve)
- *
- * Supports:
- *   - ELF32  ARMv7   (armeabi-v7a)
- *   - ELF64  AArch64 (arm64-v8a)
- *
- * Does NOT execute ARM/ARM64 code (needs dynarec later).
+ * so_util_win.c – Windows x64 Android ELF loader
+ * ELF32 ARM + ELF64 AArch64. Maps RW only (no execute) until dynarec exists.
  */
 
 #include "so_util_win.h"
@@ -14,39 +9,29 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdarg.h>
 
 #ifdef _WIN32
 #  include <windows.h>
-#else
-#  error "so_util_win is currently targeted at Windows"
 #endif
 
 #define ELFMAG      "\177ELF"
 #define SELFMAG     4
 #define ELFCLASS32  1
 #define ELFCLASS64  2
-#define ELFDATA2LSB 1
-#define ET_DYN      3
 #define EM_ARM      40
 #define EM_AARCH64  183
 #define PT_LOAD     1
 #define PF_X        1
-#define PF_W        2
-#define PF_R        4
 #define SHN_UNDEF   0
-#define DT_NULL     0
 #define DT_NEEDED   1
 #define DT_SONAME   14
 
-/* ARM32 relocs */
-#define R_ARM_NONE        0
 #define R_ARM_ABS32       2
 #define R_ARM_GLOB_DAT    21
 #define R_ARM_JUMP_SLOT   22
 #define R_ARM_RELATIVE    23
 
-/* AArch64 relocs */
-#define R_AARCH64_NONE       0
 #define R_AARCH64_ABS64      257
 #define R_AARCH64_GLOB_DAT   1025
 #define R_AARCH64_JUMP_SLOT  1026
@@ -150,30 +135,38 @@ typedef struct {
 typedef struct {
     Elf64_Addr r_offset;
     Elf64_Xword r_info;
-} Elf64_Rel;
-
-typedef struct {
-    Elf64_Addr r_offset;
-    Elf64_Xword r_info;
     Elf64_Sxword r_addend;
 } Elf64_Rela;
 
 #define ELF64_R_SYM(i)  ((uint32_t)((i) >> 32))
 #define ELF64_R_TYPE(i) ((uint32_t)(i))
 
-/* Extra fields stored via is_arm64; we also track RELA counts in unused slots
- * by packing: num_reldyn = count of .rela.dyn, num_relplt = count of .rela.plt
- * for arm64. Pointers reldyn/relplt point at Elf64_Rela arrays. */
-
 static so_module *g_head = NULL;
 static so_module *g_tail = NULL;
+static so_log_fn g_log = NULL;
 
-static void unresolved_stub(void) {
-    fprintf(stderr, "[so_util_win] call into unresolved import\n");
+void so_set_log(so_log_fn fn) { g_log = fn; }
+
+static void slog(const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (g_log) g_log(buf);
+    else fprintf(stderr, "%s\n", buf);
 }
 
-static void *win_alloc_rwx(size_t size) {
-    return VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+static void unresolved_stub(void) {
+    slog("[so] call into unresolved import");
+}
+
+/* RW only — Xbox UWP often blocks RWX; we are not executing code yet. */
+static void *win_alloc_rw(size_t size) {
+    void *p = VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!p)
+        slog("[so] VirtualAlloc(%zu) failed err=%lu", size, GetLastError());
+    return p;
 }
 
 static void win_free(void *p, size_t size) {
@@ -181,27 +174,34 @@ static void win_free(void *p, size_t size) {
     if (p) VirtualFree(p, 0, MEM_RELEASE);
 }
 
-static int load_image32(so_module *mod, const void *so_data, size_t so_size) {
+static int load_image32(so_module *mod) {
     Elf32_Ehdr *ehdr = (Elf32_Ehdr *)mod->file_image;
     mod->is_arm64 = 0;
     mod->ehdr = ehdr;
-    mod->phdr = (Elf32_Phdr *)((uint8_t *)mod->file_image + ehdr->e_phoff);
-    mod->shdr = (Elf32_Shdr *)((uint8_t *)mod->file_image + ehdr->e_shoff);
+    mod->phdr = (uint8_t *)mod->file_image + ehdr->e_phoff;
+    mod->shdr = (uint8_t *)mod->file_image + ehdr->e_shoff;
+    if (ehdr->e_shstrndx >= ehdr->e_shnum) {
+        slog("[so] bad shstrndx");
+        return -3;
+    }
     mod->shstr = (char *)((uint8_t *)mod->file_image +
                           ((Elf32_Shdr *)mod->shdr)[ehdr->e_shstrndx].sh_offset);
 
     uintptr_t min_vaddr = UINTPTR_MAX, max_vaddr = 0;
+    int nload = 0;
     for (int i = 0; i < ehdr->e_phnum; i++) {
         Elf32_Phdr *ph = &((Elf32_Phdr *)mod->phdr)[i];
         if (ph->p_type != PT_LOAD) continue;
+        nload++;
         if (ph->p_vaddr < min_vaddr) min_vaddr = ph->p_vaddr;
         uintptr_t end = (uintptr_t)ph->p_vaddr + ph->p_memsz;
         if (end > max_vaddr) max_vaddr = end;
     }
+    slog("[so] arm32 PT_LOAD count=%d span=0x%llx", nload, (unsigned long long)(max_vaddr - min_vaddr));
     if (min_vaddr == UINTPTR_MAX) return -1;
 
     size_t span = SO_ALIGN(max_vaddr - min_vaddr, 0x1000);
-    void *base = win_alloc_rwx(span);
+    void *base = win_alloc_rw(span);
     if (!base) return -1;
     mod->text_map = base;
     mod->text_map_size = span;
@@ -228,17 +228,18 @@ static int load_image32(so_module *mod, const void *so_data, size_t so_size) {
         Elf32_Shdr *sh = &((Elf32_Shdr *)mod->shdr)[i];
         const char *name = mod->shstr + sh->sh_name;
         uintptr_t addr = mod->text_base + sh->sh_addr;
-        if      (strcmp(name, ".dynamic") == 0) { mod->dynamic = (void *)addr; mod->num_dynamic = sh->sh_size / sizeof(Elf32_Dyn); }
+        if      (strcmp(name, ".dynamic") == 0) { mod->dynamic = (void *)addr; mod->num_dynamic = sh->sh_size / (int)sizeof(Elf32_Dyn); }
         else if (strcmp(name, ".dynstr")  == 0) { mod->dynstr  = (char *)addr; }
-        else if (strcmp(name, ".dynsym")  == 0) { mod->dynsym  = (void *)addr; mod->num_dynsym  = sh->sh_size / sizeof(Elf32_Sym); }
-        else if (strcmp(name, ".rel.dyn") == 0) { mod->reldyn  = (void *)addr; mod->num_reldyn  = sh->sh_size / sizeof(Elf32_Rel); }
-        else if (strcmp(name, ".rel.plt") == 0) { mod->relplt  = (void *)addr; mod->num_relplt  = sh->sh_size / sizeof(Elf32_Rel); }
-        else if (strcmp(name, ".init_array") == 0) { mod->init_array = (void *)addr; mod->num_init_array = sh->sh_size / sizeof(void *); }
-        else if (strcmp(name, ".hash") == 0) { mod->hash = (uint32_t *)addr; }
+        else if (strcmp(name, ".dynsym")  == 0) { mod->dynsym  = (void *)addr; mod->num_dynsym  = sh->sh_size / (int)sizeof(Elf32_Sym); }
+        else if (strcmp(name, ".rel.dyn") == 0) { mod->reldyn  = (void *)addr; mod->num_reldyn  = sh->sh_size / (int)sizeof(Elf32_Rel); }
+        else if (strcmp(name, ".rel.plt") == 0) { mod->relplt  = (void *)addr; mod->num_relplt  = sh->sh_size / (int)sizeof(Elf32_Rel); }
+        else if (strcmp(name, ".init_array") == 0) { mod->init_array = (void *)addr; mod->num_init_array = sh->sh_size / (int)sizeof(void *); }
     }
 
-    if (!mod->dynamic || !mod->dynstr || !mod->dynsym) return -2;
-
+    if (!mod->dynamic || !mod->dynstr || !mod->dynsym) {
+        slog("[so] missing dynamic/dynstr/dynsym");
+        return -2;
+    }
     for (int i = 0; i < mod->num_dynamic; i++) {
         Elf32_Dyn *d = &((Elf32_Dyn *)mod->dynamic)[i];
         if (d->d_tag == DT_SONAME)
@@ -247,112 +248,152 @@ static int load_image32(so_module *mod, const void *so_data, size_t so_size) {
     return 0;
 }
 
-static int load_image64(so_module *mod, const void *so_data, size_t so_size) {
+static int load_image64(so_module *mod) {
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)mod->file_image;
     mod->is_arm64 = 1;
     mod->ehdr = ehdr;
     mod->phdr = (uint8_t *)mod->file_image + ehdr->e_phoff;
     mod->shdr = (uint8_t *)mod->file_image + ehdr->e_shoff;
-    mod->shstr = (char *)((uint8_t *)mod->file_image +
-                          ((Elf64_Shdr *)mod->shdr)[ehdr->e_shstrndx].sh_offset);
+
+    slog("[so] arm64 e_phnum=%u e_shnum=%u phoff=%llu shoff=%llu",
+         ehdr->e_phnum, ehdr->e_shnum,
+         (unsigned long long)ehdr->e_phoff, (unsigned long long)ehdr->e_shoff);
+
+    if (ehdr->e_phoff + (Elf64_Off)ehdr->e_phnum * sizeof(Elf64_Phdr) > mod->file_size) {
+        slog("[so] phdr table out of range");
+        return -3;
+    }
+    if (ehdr->e_shnum && ehdr->e_shstrndx >= ehdr->e_shnum) {
+        slog("[so] bad shstrndx %u", ehdr->e_shstrndx);
+        return -3;
+    }
+    if (ehdr->e_shnum) {
+        mod->shstr = (char *)((uint8_t *)mod->file_image +
+                              ((Elf64_Shdr *)mod->shdr)[ehdr->e_shstrndx].sh_offset);
+    }
 
     uintptr_t min_vaddr = UINTPTR_MAX, max_vaddr = 0;
+    int nload = 0;
     for (int i = 0; i < ehdr->e_phnum; i++) {
         Elf64_Phdr *ph = &((Elf64_Phdr *)mod->phdr)[i];
         if (ph->p_type != PT_LOAD) continue;
+        nload++;
+        slog("[so]   LOAD vaddr=0x%llx filesz=%llu memsz=%llu flags=0x%x",
+             (unsigned long long)ph->p_vaddr,
+             (unsigned long long)ph->p_filesz,
+             (unsigned long long)ph->p_memsz,
+             ph->p_flags);
         if ((uintptr_t)ph->p_vaddr < min_vaddr) min_vaddr = (uintptr_t)ph->p_vaddr;
         uintptr_t end = (uintptr_t)ph->p_vaddr + (uintptr_t)ph->p_memsz;
         if (end > max_vaddr) max_vaddr = end;
     }
-    if (min_vaddr == UINTPTR_MAX) return -1;
+    slog("[so] PT_LOAD count=%d span=%zu", nload, (size_t)(max_vaddr - min_vaddr));
+    if (min_vaddr == UINTPTR_MAX) {
+        slog("[so] no PT_LOAD segments");
+        return -1;
+    }
 
     size_t span = SO_ALIGN(max_vaddr - min_vaddr, 0x1000);
-    void *base = win_alloc_rwx(span);
+    void *base = win_alloc_rw(span);
     if (!base) return -1;
     mod->text_map = base;
     mod->text_map_size = span;
     mod->text_base = (uintptr_t)base - min_vaddr;
+    slog("[so] mapped base=%p text_base=0x%llx", base, (unsigned long long)mod->text_base);
 
     for (int i = 0; i < ehdr->e_phnum; i++) {
         Elf64_Phdr *ph = &((Elf64_Phdr *)mod->phdr)[i];
         if (ph->p_type != PT_LOAD) continue;
         void *dest = (uint8_t *)base + ((uintptr_t)ph->p_vaddr - min_vaddr);
-        if (ph->p_filesz)
-            memcpy(dest, (uint8_t *)mod->file_image + (size_t)ph->p_offset, (size_t)ph->p_filesz);
-        if (ph->p_memsz > ph->p_filesz)
-            memset((uint8_t *)dest + (size_t)ph->p_filesz, 0, (size_t)(ph->p_memsz - ph->p_filesz));
+        size_t fsz = (size_t)ph->p_filesz;
+        size_t msz = (size_t)ph->p_memsz;
+        if (ph->p_offset + fsz > mod->file_size) {
+            slog("[so] LOAD filesz out of range");
+            return -3;
+        }
+        if (fsz) memcpy(dest, (uint8_t *)mod->file_image + (size_t)ph->p_offset, fsz);
+        if (msz > fsz) memset((uint8_t *)dest + fsz, 0, msz - fsz);
         if (ph->p_flags & PF_X)
-            mod->text_size = (size_t)ph->p_memsz;
+            mod->text_size = msz;
         else if (mod->n_data < SO_MAX_DATA_SEG) {
             mod->data_base[mod->n_data] = (uintptr_t)dest;
-            mod->data_size[mod->n_data] = (size_t)ph->p_memsz;
+            mod->data_size[mod->n_data] = msz;
             mod->n_data++;
         }
     }
 
     for (int i = 0; i < ehdr->e_shnum; i++) {
         Elf64_Shdr *sh = &((Elf64_Shdr *)mod->shdr)[i];
-        const char *name = mod->shstr + sh->sh_name;
+        const char *name = mod->shstr ? mod->shstr + sh->sh_name : "";
         uintptr_t addr = mod->text_base + (uintptr_t)sh->sh_addr;
         if      (strcmp(name, ".dynamic") == 0) { mod->dynamic = (void *)addr; mod->num_dynamic = (int)(sh->sh_size / sizeof(Elf64_Dyn)); }
         else if (strcmp(name, ".dynstr")  == 0) { mod->dynstr  = (char *)addr; }
         else if (strcmp(name, ".dynsym")  == 0) { mod->dynsym  = (void *)addr; mod->num_dynsym  = (int)(sh->sh_size / sizeof(Elf64_Sym)); }
         else if (strcmp(name, ".rela.dyn") == 0) { mod->reldyn = (void *)addr; mod->num_reldyn = (int)(sh->sh_size / sizeof(Elf64_Rela)); }
         else if (strcmp(name, ".rela.plt") == 0) { mod->relplt = (void *)addr; mod->num_relplt = (int)(sh->sh_size / sizeof(Elf64_Rela)); }
-        else if (strcmp(name, ".rel.dyn") == 0) { mod->reldyn = (void *)addr; mod->num_reldyn = (int)(sh->sh_size / sizeof(Elf64_Rel)); }
-        else if (strcmp(name, ".rel.plt") == 0) { mod->relplt = (void *)addr; mod->num_relplt = (int)(sh->sh_size / sizeof(Elf64_Rel)); }
         else if (strcmp(name, ".init_array") == 0) { mod->init_array = (void *)addr; mod->num_init_array = (int)(sh->sh_size / sizeof(void *)); }
-        else if (strcmp(name, ".hash") == 0) { mod->hash = (uint32_t *)addr; }
     }
 
-    if (!mod->dynamic || !mod->dynstr || !mod->dynsym) return -2;
+    slog("[so] dynsym=%d rela.dyn=%d rela.plt=%d", mod->num_dynsym, mod->num_reldyn, mod->num_relplt);
 
+    if (!mod->dynamic || !mod->dynstr || !mod->dynsym) {
+        slog("[so] missing dynamic sections (dynamic=%p dynstr=%p dynsym=%p)",
+             mod->dynamic, (void *)mod->dynstr, mod->dynsym);
+        return -2;
+    }
     for (int i = 0; i < mod->num_dynamic; i++) {
         Elf64_Dyn *d = &((Elf64_Dyn *)mod->dynamic)[i];
         if (d->d_tag == DT_SONAME)
             mod->soname = mod->dynstr + (size_t)d->d_un.d_ptr;
     }
+    if (mod->soname) slog("[so] soname=%s", mod->soname);
     return 0;
 }
 
 static int load_image(so_module *mod, const void *so_data, size_t so_size) {
     memset(mod, 0, sizeof(*mod));
 
-    if (so_size < 16 || memcmp(so_data, ELFMAG, SELFMAG) != 0) {
-        fprintf(stderr, "[so_util_win] not an ELF\n");
+    if (so_size < 64 || memcmp(so_data, ELFMAG, SELFMAG) != 0) {
+        slog("[so] not an ELF (size=%zu)", so_size);
         return -1;
     }
 
     mod->file_image = malloc(so_size);
-    if (!mod->file_image) return -1;
+    if (!mod->file_image) {
+        slog("[so] malloc file image failed");
+        return -1;
+    }
     memcpy(mod->file_image, so_data, so_size);
     mod->file_size = so_size;
 
     const unsigned char *id = (const unsigned char *)mod->file_image;
     int cls = id[4];
-    uint16_t machine = *(uint16_t *)(id + 18); /* e_machine little-endian */
+    uint16_t machine = (uint16_t)(id[18] | (id[19] << 8));
+    slog("[so] class=%d machine=%u size=%zu", cls, machine, so_size);
 
     int rc;
     if (cls == ELFCLASS32 && machine == EM_ARM) {
-        fprintf(stderr, "[so_util_win] ELF32 ARM (armeabi-v7a)\n");
-        rc = load_image32(mod, so_data, so_size);
+        rc = load_image32(mod);
     } else if (cls == ELFCLASS64 && machine == EM_AARCH64) {
-        fprintf(stderr, "[so_util_win] ELF64 AArch64 (arm64-v8a)\n");
-        rc = load_image64(mod, so_data, so_size);
+        rc = load_image64(mod);
     } else {
-        fprintf(stderr, "[so_util_win] unsupported ELF class=%u machine=%u\n", cls, machine);
+        slog("[so] unsupported ELF");
         free(mod->file_image);
         mod->file_image = NULL;
         return -1;
     }
 
     if (rc != 0) {
-        so_unload(mod);
+        slog("[so] load_image* failed rc=%d", rc);
+        if (mod->text_map) { win_free(mod->text_map, mod->text_map_size); mod->text_map = NULL; }
+        free(mod->file_image);
+        mod->file_image = NULL;
         return rc;
     }
 
     if (!g_head) { g_head = g_tail = mod; }
     else         { g_tail->next = mod; g_tail = mod; }
+    slog("[so] load OK arch=%s", mod->is_arm64 ? "arm64" : "arm32");
     return 0;
 }
 
@@ -364,7 +405,7 @@ int so_mem_load(so_module *mod, const void *buffer, size_t so_size, uintptr_t lo
 int so_file_load(so_module *mod, const char *filename, uintptr_t load_addr) {
     (void)load_addr;
     FILE *f = fopen(filename, "rb");
-    if (!f) return -1;
+    if (!f) { slog("[so] fopen failed %s", filename); return -1; }
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -387,7 +428,6 @@ static int so_relocate32(so_module *mod) {
         Elf32_Sym *sym = &((Elf32_Sym *)mod->dynsym)[ELF32_R_SYM(rel->r_info)];
         uint32_t *ptr = (uint32_t *)(mod->text_base + rel->r_offset);
         int type = ELF32_R_TYPE(rel->r_info);
-        uint32_t val;
         switch (type) {
         case R_ARM_RELATIVE:
             *ptr = (uint32_t)(*ptr + (uint32_t)mod->text_base);
@@ -401,15 +441,13 @@ static int so_relocate32(so_module *mod) {
             if (sym->st_shndx != SHN_UNDEF)
                 *ptr = (uint32_t)(mod->text_base + sym->st_value);
             break;
-        default:
-            break;
+        default: break;
         }
     }
     return 0;
 }
 
 static int so_relocate64(so_module *mod) {
-    /* Prefer RELA (standard for AArch64 Android). */
     int total = mod->num_reldyn + mod->num_relplt;
     for (int i = 0; i < total; i++) {
         Elf64_Rela *rela = i < mod->num_reldyn
@@ -431,8 +469,7 @@ static int so_relocate64(so_module *mod) {
             if (sym->st_shndx != SHN_UNDEF)
                 *ptr = (uint64_t)mod->text_base + sym->st_value;
             break;
-        default:
-            break;
+        default: break;
         }
     }
     return 0;
@@ -443,33 +480,7 @@ int so_relocate(so_module *mod) {
 }
 
 static uintptr_t resolve_from_deps(so_module *mod, const char *symbol) {
-    if (mod->is_arm64) {
-        for (int i = 0; i < mod->num_dynamic; i++) {
-            Elf64_Dyn *d = &((Elf64_Dyn *)mod->dynamic)[i];
-            if (d->d_tag != DT_NEEDED) continue;
-            const char *needed = mod->dynstr + (size_t)d->d_un.d_ptr;
-            for (so_module *c = g_head; c; c = c->next) {
-                if (c == mod || !c->soname) continue;
-                if (strcmp(c->soname, needed) == 0) {
-                    uintptr_t link = so_symbol(c, symbol);
-                    if (link) return link;
-                }
-            }
-        }
-    } else {
-        for (int i = 0; i < mod->num_dynamic; i++) {
-            Elf32_Dyn *d = &((Elf32_Dyn *)mod->dynamic)[i];
-            if (d->d_tag != DT_NEEDED) continue;
-            const char *needed = mod->dynstr + d->d_un.d_ptr;
-            for (so_module *c = g_head; c; c = c->next) {
-                if (c == mod || !c->soname) continue;
-                if (strcmp(c->soname, needed) == 0) {
-                    uintptr_t link = so_symbol(c, symbol);
-                    if (link) return link;
-                }
-            }
-        }
-    }
+    (void)mod; (void)symbol;
     return 0;
 }
 
@@ -477,6 +488,7 @@ static int so_resolve32(so_module *mod, so_default_dynlib *default_dynlib,
                         int size_default_dynlib, int default_dynlib_only) {
     int n_entries = size_default_dynlib / (int)sizeof(so_default_dynlib);
     int total = mod->num_reldyn + mod->num_relplt;
+    int unresolved = 0;
     for (int i = 0; i < total; i++) {
         Elf32_Rel *rel = i < mod->num_reldyn
             ? &((Elf32_Rel *)mod->reldyn)[i]
@@ -487,7 +499,6 @@ static int so_resolve32(so_module *mod, so_default_dynlib *default_dynlib,
         if (type != R_ARM_ABS32 && type != R_ARM_GLOB_DAT && type != R_ARM_JUMP_SLOT)
             continue;
         if (sym->st_shndx != SHN_UNDEF) continue;
-
         const char *name = mod->dynstr + sym->st_name;
         int resolved = 0;
         if (!default_dynlib_only) {
@@ -504,11 +515,13 @@ static int so_resolve32(so_module *mod, so_default_dynlib *default_dynlib,
             }
         }
         if (!resolved) {
-            fprintf(stderr, "[so_util_win] unresolved: %s\n", name);
+            if (unresolved < 40) slog("[so] unresolved: %s", name);
+            unresolved++;
             if (type == R_ARM_JUMP_SLOT)
                 *ptr = (uint32_t)(uintptr_t)&unresolved_stub;
         }
     }
+    slog("[so] unresolved count=%d", unresolved);
     return 0;
 }
 
@@ -516,6 +529,7 @@ static int so_resolve64(so_module *mod, so_default_dynlib *default_dynlib,
                         int size_default_dynlib, int default_dynlib_only) {
     int n_entries = size_default_dynlib / (int)sizeof(so_default_dynlib);
     int total = mod->num_reldyn + mod->num_relplt;
+    int unresolved = 0;
     for (int i = 0; i < total; i++) {
         Elf64_Rela *rela = i < mod->num_reldyn
             ? &((Elf64_Rela *)mod->reldyn)[i]
@@ -526,7 +540,6 @@ static int so_resolve64(so_module *mod, so_default_dynlib *default_dynlib,
         if (type != R_AARCH64_ABS64 && type != R_AARCH64_GLOB_DAT && type != R_AARCH64_JUMP_SLOT)
             continue;
         if (sym->st_shndx != SHN_UNDEF) continue;
-
         const char *name = mod->dynstr + sym->st_name;
         int resolved = 0;
         if (!default_dynlib_only) {
@@ -543,11 +556,13 @@ static int so_resolve64(so_module *mod, so_default_dynlib *default_dynlib,
             }
         }
         if (!resolved) {
-            fprintf(stderr, "[so_util_win] unresolved: %s\n", name);
+            if (unresolved < 40) slog("[so] unresolved: %s", name);
+            unresolved++;
             if (type == R_AARCH64_JUMP_SLOT)
                 *ptr = (uint64_t)(uintptr_t)&unresolved_stub;
         }
     }
+    slog("[so] unresolved count=%d", unresolved);
     return 0;
 }
 
@@ -559,11 +574,7 @@ int so_resolve(so_module *mod, so_default_dynlib *default_dynlib,
 }
 
 void so_initialize(so_module *mod) {
-    for (int i = 0; i < mod->num_init_array; i++) {
-        if (mod->init_array[i] && (intptr_t)mod->init_array[i] != -1)
-            fprintf(stderr, "[so_util_win] init_array[%d]=%p (not executed)\n",
-                    i, (void *)mod->init_array[i]);
-    }
+    slog("[so] init_array entries=%d (not executed)", mod->num_init_array);
 }
 
 uintptr_t so_symbol(so_module *mod, const char *symbol) {
@@ -596,14 +607,10 @@ void so_unload(so_module *mod) {
     }
     free(mod->file_image);
     mod->file_image = NULL;
-
     so_module **pp = &g_head;
     while (*pp) {
         if (*pp == mod) {
             *pp = mod->next;
-            if (g_tail == mod)
-                g_tail = (*pp == NULL && pp == &g_head) ? NULL : g_head;
-            /* simple: recompute tail */
             g_tail = g_head;
             if (g_tail) while (g_tail->next) g_tail = g_tail->next;
             break;
@@ -615,11 +622,6 @@ void so_unload(so_module *mod) {
 
 void so_dump_info(const so_module *mod) {
     if (!mod) return;
-    printf("so_module @ %p  arch=%s\n", (const void *)mod, mod->is_arm64 ? "arm64" : "arm32");
-    printf("  soname     : %s\n", mod->soname ? mod->soname : "(none)");
-    printf("  text_base  : 0x%llx\n", (unsigned long long)mod->text_base);
-    printf("  text_size  : %zu\n", mod->text_size);
-    printf("  map        : %p (%zu bytes)\n", mod->text_map, mod->text_map_size);
-    printf("  dynsym=%d reldyn=%d relplt=%d init=%d\n",
-           mod->num_dynsym, mod->num_reldyn, mod->num_relplt, mod->num_init_array);
+    slog("[so] arch=%s text_base=0x%llx size=%zu", mod->is_arm64 ? "arm64" : "arm32",
+         (unsigned long long)mod->text_base, mod->text_size);
 }
