@@ -1,10 +1,11 @@
 // NBA Jam Mobile – UWP shell for Xbox Dev Mode
-// Looks for game files on D:\DevelopmentFiles\NBA Jam Mobile
+// Loads libnbajam.so from D:\DevelopmentFiles\NBA Jam Mobile (no ARM execution yet)
 
 #include <windows.h>
 #include <wrl/client.h>
 #include <cstdio>
 #include <cstdarg>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -23,7 +24,6 @@ static HANDLE g_file = INVALID_HANDLE_VALUE;
 static UI::Controls::TextBlock^ g_tb;
 static Windows::UI::Core::CoreDispatcher^ g_disp;
 
-// Primary path the user should use on Xbox Dev Mode
 static const wchar_t* kGameDir = L"D:\\DevelopmentFiles\\NBA Jam Mobile";
 
 static void Log(const wchar_t* fmt, ...) {
@@ -52,13 +52,148 @@ static void Log(const wchar_t* fmt, ...) {
 }
 
 static bool PathExists(const wchar_t* path) {
-    DWORD a = GetFileAttributesW(path);
-    return a != INVALID_FILE_ATTRIBUTES;
+    return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
 }
 
 static bool FileExists(const wchar_t* path) {
     DWORD a = GetFileAttributesW(path);
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// Read whole file via Win32 (works better than fopen on UWP / Xbox paths)
+static bool ReadFileBytes(const wchar_t* path, std::vector<uint8_t>& out) {
+    HANDLE h = CreateFile2(path, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        Log(L"  CreateFile failed (%lu)", GetLastError());
+        return false;
+    }
+    FILE_STANDARD_INFO info = {};
+    if (!GetFileInformationByHandleEx(h, FileStandardInfo, &info, sizeof(info))) {
+        Log(L"  GetFileInformation failed (%lu)", GetLastError());
+        CloseHandle(h);
+        return false;
+    }
+    ULONGLONG sz = (ULONGLONG)info.EndOfFile.QuadPart;
+    if (sz == 0 || sz > 256ull * 1024 * 1024) {
+        Log(L"  bad size: %llu", sz);
+        CloseHandle(h);
+        return false;
+    }
+    out.resize((size_t)sz);
+    size_t off = 0;
+    while (off < out.size()) {
+        DWORD n = 0;
+        DWORD chunk = (DWORD)min(out.size() - off, (size_t)1 << 20);
+        if (!ReadFile(h, out.data() + off, chunk, &n, nullptr) || n == 0) {
+            Log(L"  ReadFile failed at %zu (%lu)", off, GetLastError());
+            CloseHandle(h);
+            return false;
+        }
+        off += n;
+    }
+    CloseHandle(h);
+    return true;
+}
+
+static int stub_ret0(void) { return 0; }
+static void* stub_malloc(size_t n) { return malloc(n ? n : 1); }
+static void  stub_free(void* p) { free(p); }
+static void* stub_memcpy(void* d, const void* s, size_t n) { return memcpy(d, s, n); }
+static void* stub_memset(void* d, int c, size_t n) { return memset(d, c, n); }
+static int   stub_strcmp(const char* a, const char* b) { return strcmp(a, b); }
+static size_t stub_strlen(const char* s) { return strlen(s); }
+
+static so_default_dynlib g_stubs[] = {
+    { "malloc",  (uintptr_t)stub_malloc },
+    { "free",    (uintptr_t)stub_free },
+    { "memcpy",  (uintptr_t)stub_memcpy },
+    { "memset",  (uintptr_t)stub_memset },
+    { "strcmp",  (uintptr_t)stub_strcmp },
+    { "strlen",  (uintptr_t)stub_strlen },
+    { "__errno", (uintptr_t)stub_ret0 },
+};
+
+static void TryLoadSo(const wchar_t* soPath) {
+    Log(L"----------------------------------------");
+    Log(L"Loading .so:");
+    Log(L"  %s", soPath);
+
+    if (!FileExists(soPath)) {
+        Log(L"  [ ] file missing");
+        return;
+    }
+
+    std::vector<uint8_t> bytes;
+    if (!ReadFileBytes(soPath, bytes)) {
+        Log(L"  [ ] read failed");
+        return;
+    }
+    Log(L"  read %zu bytes", bytes.size());
+
+    so_module mod;
+    memset(&mod, 0, sizeof(mod));
+
+    int rc = so_mem_load(&mod, bytes.data(), bytes.size(), 0);
+    if (rc != 0) {
+        Log(L"  so_mem_load failed (%d)", rc);
+        Log(L"  (need 32-bit ARM ELF — arm64 not supported in this cut)");
+        return;
+    }
+    Log(L"  so_mem_load OK");
+
+    if (mod.soname)
+        Log(L"  soname: %S", /* narrow printed via Log's ASCII path */ L"");
+    // soname is char* — print carefully
+    if (mod.soname) {
+        wchar_t w[128];
+        size_t i = 0;
+        for (; mod.soname[i] && i + 1 < 128; ++i) w[i] = (wchar_t)(unsigned char)mod.soname[i];
+        w[i] = 0;
+        Log(L"  soname: %s", w);
+    }
+
+    Log(L"  text_base=0x%llx  text_size=%zu", (unsigned long long)mod.text_base, mod.text_size);
+    Log(L"  dynsym=%d  reldyn=%d  relplt=%d  init_array=%d",
+        mod.num_dynsym, mod.num_reldyn, mod.num_relplt, mod.num_init_array);
+
+    rc = so_relocate(&mod);
+    Log(L"  so_relocate -> %d", rc);
+
+    rc = so_resolve(&mod, g_stubs, (int)sizeof(g_stubs), 0);
+    Log(L"  so_resolve  -> %d  (unresolved imports printed to log)", rc);
+
+    const char* try_syms[] = {
+        "JNI_OnLoad",
+        "JNI_OnUnload",
+        "Java_com_eamobile_nbajam_NBAJamActivity_nativeOnCreate",
+        "Java_com_eamobile_nbajam_NBAJamActivity_nativeOnResume",
+        "Java_com_eamobile_nbajam_NBAJamActivity_nativeOnPause",
+        "Java_com_eamobile_nbajam_NBAJamActivity_nativeKeyDown",
+        "Java_com_eamobile_nbajam_NBAJamActivity_nativeKeyUp",
+        "Java_com_eamobile_nbajam_NBAJamActivity_nativeTouchEvent",
+        "ANativeActivity_onCreate",
+        nullptr
+    };
+
+    Log(L"  Symbols:");
+    for (int i = 0; try_syms[i]; ++i) {
+        uintptr_t a = so_symbol(&mod, try_syms[i]);
+        wchar_t namew[160];
+        size_t j = 0;
+        for (; try_syms[i][j] && j + 1 < 160; ++j) namew[j] = (wchar_t)(unsigned char)try_syms[i][j];
+        namew[j] = 0;
+        if (a)
+            Log(L"    [x] %s = 0x%llx", namew, (unsigned long long)a);
+        else
+            Log(L"    [ ] %s", namew);
+    }
+
+    Log(L"  init_array: not executed (no dynarec yet)");
+    so_initialize(&mod); // only logs from so_util_win
+
+    so_unload(&mod);
+    Log(L"  unloaded");
+    Log(L"----------------------------------------");
 }
 
 static void ProbeGameFolder(const wchar_t* dir) {
@@ -72,71 +207,48 @@ static void ProbeGameFolder(const wchar_t* dir) {
     std::wstring base = dir;
     if (!base.empty() && base.back() != L'\\') base += L'\\';
 
-    struct Item { const wchar_t* name; const wchar_t* note; };
-    Item items[] = {
-        { L"libnbajam.so", L"required (from APK lib/armeabi-v7a or arm64)" },
-        { L"main.obb", L"or main.*.obb / data.psarc" },
-        { L"*.apk", L"optional – keep a copy of the APK here" },
-        { L"*.obb", L"optional – OBB package" },
-    };
+    std::wstring soPath = base + L"libnbajam.so";
+    bool hasSo = FileExists(soPath.c_str());
+    Log(L"  [%c] libnbajam.so", hasSo ? L'x' : L' ');
 
-    // Check known filenames
-    const wchar_t* known[] = {
-        L"libnbajam.so",
-        L"libNimble.so",
-        L"main.obb",
-        L"data.psarc",
-        L"main.40080.com.eamobile.nbajam_row_wf.obb",
-    };
-    for (const wchar_t* name : known) {
-        std::wstring full = base + name;
-        if (FileExists(full.c_str()))
-            Log(L"  [x] %s", name);
-        else
-            Log(L"  [ ] %s", name);
-    }
-
-    // List a few files in the directory (best-effort)
+    // List files + note any .obb / .apk
     std::wstring pattern = base + L"*";
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+    bool hasObb = false, hasApk = false;
     if (h != INVALID_HANDLE_VALUE) {
         int shown = 0;
         do {
             if (fd.cFileName[0] == L'.') continue;
             if (shown == 0) Log(L"  Files in folder:");
             Log(L"    - %s", fd.cFileName);
-            if (++shown >= 20) {
-                Log(L"    ...");
-                break;
-            }
+            std::wstring name = fd.cFileName;
+            for (auto& c : name) if (c >= L'A' && c <= L'Z') c = (wchar_t)(c - L'A' + L'a');
+            if (name.size() >= 4 && name.substr(name.size() - 4) == L".obb") hasObb = true;
+            if (name.size() >= 4 && name.substr(name.size() - 4) == L".apk") hasApk = true;
+            if (++shown >= 30) { Log(L"    ..."); break; }
         } while (FindNextFileW(h, &fd));
         FindClose(h);
-        if (shown == 0) Log(L"  (folder is empty)");
     }
+    Log(L"  [%c] .obb present", hasObb ? L'x' : L' ');
+    Log(L"  [%c] .apk present", hasApk ? L'x' : L' ');
+
+    if (hasSo)
+        TryLoadSo(soPath.c_str());
+    else
+        Log(L"  Skip load — no libnbajam.so");
 }
 
 static void RunProbe() {
     Log(L"========================================");
-    Log(L"  NBA Jam Mobile");
-    Log(L"  Xbox Dev Mode loader");
+    Log(L"  NBA Jam Mobile 0.2");
+    Log(L"  load + symbol dump");
     Log(L"========================================");
     Log(L"");
-    Log(L"PUT THE OBB AND APK HERE:");
-    Log(L"");
-    Log(L"  D:\\DevelopmentFiles\\NBA Jam Mobile\\");
-    Log(L"");
-    Log(L"Recommended contents:");
-    Log(L"  1. Your NBA Jam .apk  (keep a copy)");
-    Log(L"  2. Your .obb file(s)");
-    Log(L"  3. libnbajam.so extracted from the APK");
-    Log(L"     (lib/armeabi-v7a or lib/arm64-v8a)");
-    Log(L"");
-    Log(L"Create the folder in Device Portal / File explorer");
-    Log(L"or from a PC over SMB if you have it set up.");
+    Log(L"Game folder:");
+    Log(L"  %s", kGameDir);
     Log(L"");
 
-    // Probe D: and a few fallbacks
     const wchar_t* candidates[] = {
         L"D:\\DevelopmentFiles\\NBA Jam Mobile",
         L"D:\\DevelopmentFiles\\NBAJamMobile",
@@ -153,30 +265,23 @@ static void RunProbe() {
         }
     }
     if (!any) {
-        Log(L"No game folder found yet.");
-        Log(L"Create this folder and copy your files:");
-        Log(L"  %s", kGameDir);
-        Log(L"");
+        Log(L"No game folder found.");
+        Log(L"Create: %s", kGameDir);
+        Log(L"Put libnbajam.so + .obb + .apk there.");
     }
 
-    // Also note LocalState as secondary location
     try {
         auto local = Windows::Storage::ApplicationData::Current->LocalFolder->Path;
-        Log(L"App LocalState (fallback):");
-        Log(L"  %s", local->Data());
-    } catch (...) {
-        Log(L"(could not read LocalState path)");
-    }
+        Log(L"LocalState: %s", local->Data());
+    } catch (...) {}
 
     Log(L"");
-    Log(L"so_util_win linked OK");
-    Log(L"AppMemoryUsageLimit = %llu MB",
-        Windows::System::MemoryManager::AppMemoryUsageLimit >> 20);
-    Log(L"AppMemoryUsage      = %llu MB",
+    Log(L"Mem limit=%llu MB  used=%llu MB",
+        Windows::System::MemoryManager::AppMemoryUsageLimit >> 20,
         Windows::System::MemoryManager::AppMemoryUsage >> 20);
     Log(L"");
     Log(L"== DONE ==");
-    Log(L"Next build will load libnbajam.so from that folder.");
+    Log(L"ARM code is NOT executed yet (needs dynarec).");
 }
 
 namespace NbaJamLoader {
@@ -185,11 +290,11 @@ namespace NbaJamLoader {
         virtual void OnLaunched(Windows::ApplicationModel::Activation::LaunchActivatedEventArgs^ e) override {
             auto tb = ref new UI::Controls::TextBlock();
             tb->FontFamily = ref new UI::Media::FontFamily(L"Consolas");
-            tb->FontSize = 20;
+            tb->FontSize = 18;
             tb->TextWrapping = UI::TextWrapping::Wrap;
-            tb->Margin = UI::ThicknessHelper::FromUniformLength(36);
+            tb->Margin = UI::ThicknessHelper::FromUniformLength(28);
             tb->Foreground = ref new UI::Media::SolidColorBrush(Windows::UI::Colors::White);
-            tb->Text = L"NBA Jam Mobile — starting...";
+            tb->Text = L"NBA Jam Mobile — loading...";
 
             auto sv = ref new UI::Controls::ScrollViewer();
             sv->Content = tb;
